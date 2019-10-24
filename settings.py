@@ -1,87 +1,63 @@
-import os
-REPOSITORY_PATH = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'source') # I hate os.*
+from django.http import HttpResponseRedirect, HttpResponse, Http404
+from django.template import Template, Context
+from django.templatetags.markup import restructuredtext
+from django.utils.safestring import mark_safe
 
-# Django settings for cream project.
+from cms.models import PageType, Page, Redirection
 
-DEBUG = True
-TEMPLATE_DEBUG = DEBUG
+from cms import register_template
 
-ADMINS = (
-    ('stein', 'your_email@domain.com'),
-)
+import time
+import datetime
+import git
+import repo
 
-MANAGERS = ADMINS
+REPO = repo.get_repository()
 
-DATABASE_ENGINE = 'sqlite3'    # 'postgresql_psycopg2', 'postgresql', 'mysql', 'sqlite3' or 'oracle'.
-DATABASE_NAME = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'database')     # Or path to database file if using sqlite3.
-DATABASE_USER = ''             # Not used with sqlite3.
-DATABASE_PASSWORD = ''         # Not used with sqlite3.
-DATABASE_HOST = ''             # Set to empty string for localhost. Not used with sqlite3.
-DATABASE_PORT = ''             # Set to empty string for default. Not used with sqlite3.
+def view(request, path, revision=None):
 
-# Local time zone for this installation. Choices can be found here:
-# http://en.wikipedia.org/wiki/List_of_tz_zones_by_name
-# although not all choices may be available on all operating systems.
-# If running in a Windows environment this must be set to the same as your
-# system time zone.
-TIME_ZONE = 'Europe/Berlin'
+    try:
+        return HttpResponseRedirect(Redirection.objects.get(url=request.path))
+    except Redirection.DoesNotExist:
+        pass
 
-# Language code for this installation. All choices can be found here:
-# http://www.i18nguy.com/unicode/language-identifiers.html
-LANGUAGE_CODE = 'de-de'
+    revision = REPO.commit(revision or 'HEAD')
+    try:
+        sourcefile = repo.get_file_from_tree(revision.tree, path)
+    except git.NoSuchPathError:
+        raise Http404("Page '%s' not found." % path)
 
-SITE_ID = 1
+    content = sourcefile.data
+    mime_type = sourcefile.mime_type
 
-# If you set this to False, Django will make some optimizations so as not
-# to load the internationalization machinery.
-USE_I18N = True
+    first_line = content[:content.find('\n')]
+    if mime_type == 'text/plain' and first_line.startswith('%%'):
+        content_type = first_line[2:]
+        if content_type:
+            page_type = PageType.objects.get(id=content_type.strip())
 
-# Absolute path to the directory that holds media.
-# Example: "/home/media/media.lawrence.com/"
-MEDIA_ROOT = ''
+            layout = page_type.layout
+            template = Template(layout, name='main_template')
 
-# URL that handles the media served from MEDIA_ROOT. Make sure to use a
-# trailing slash if there is a path component (optional in other cases).
-# Examples: "http://media.lawrence.com", "http://example.com/media/"
-MEDIA_URL = ''
+            content = content[content.find('\n')+1:]
+            if page_type.markup == 'restructuredtext':
+                content = restructuredtext(':author: none\n\n' + content)
+            elif page_type.markup == 'html':
+                content = mark_safe(content)
+            elif page_type.markup == 'template':
+                register_template('main_template', layout)
+                template = Template('{% extends "main_template" %}\n' + content)
+    else:
+        return HttpResponse(content, mimetype=mime_type)
 
-# URL prefix for admin media -- CSS, JavaScript and images. Make sure to use a
-# trailing slash.
-# Examples: "http://foo.com/media/", "/media/".
-ADMIN_MEDIA_PREFIX = '/media/'
+    history = REPO.iter_commits('master', max_count=5)
 
-# Make this unique, and don't share it with anybody.
-SECRET_KEY = 'm7xrce%9l5%4gse4o(08&bb(jdopl)qpl4(c5#mxlb%=5fqevw'
+    pages = Page.objects.all().filter(visible=True).order_by('position')
 
-# List of callables that know how to import templates from various sources.
-TEMPLATE_LOADERS = (
-    'cms.load_template_source',
-    'django.template.loaders.filesystem.load_template_source',
-    'django.template.loaders.app_directories.load_template_source',
-#     'django.template.loaders.eggs.load_template_source',
-)
-
-MIDDLEWARE_CLASSES = (
-    'django.middleware.common.CommonMiddleware',
-    'django.contrib.sessions.middleware.SessionMiddleware',
-    'django.contrib.auth.middleware.AuthenticationMiddleware',
-)
-
-ROOT_URLCONF = 'urls'
-
-TEMPLATE_DIRS = (
-    # Put strings here, like "/home/html/django_templates" or "C:/www/django/templates".
-    # Always use forward slashes, even on Windows.
-    # Don't forget to use absolute paths, not relative paths.
-    os.path.join(os.path.abspath(os.path.dirname(__file__)), 'templates'),
-)
-
-INSTALLED_APPS = (
-    'django.contrib.admin',
-    'django.contrib.auth',
-    'django.contrib.contenttypes',
-    'django.contrib.sessions',
-    'django.contrib.sites',
-    'django.contrib.markup',
-    'cms',
-)
+    return HttpResponse(template.render(Context({
+        'content': content,
+        'path': path,
+        'history': history,
+        'pages': pages,
+        'title' : path.strip('/')
+    })))
